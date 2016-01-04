@@ -1,0 +1,105 @@
+#!/usr/bin/env php
+<?php
+
+// A simple script to add a new major version to PHP functions
+// programmatically.
+//
+// Basic usage (for adding PHP 7 to functions in the last PHP 5 version):
+// upgrade-versions -f "PHP 5" -r "PHP 7"
+//
+// You can also specify an exclusions file, which is used for functions that
+// were removed: functions matching entries in this file will not be updated.
+// Function names are separated by any whitespace.
+
+function usage() {
+  echo "Usage: {$_SERVER['argv'][0]} -f FIND -r STRING-TO-APPEND [-d|--directory=DIRECTORY] [-n|--dry-run] [-x|--exclusions=EXCLUSIONS]\n";
+  exit(1);
+}
+
+// Parse options.
+$options = getopt('nhx:d:f:r:', ['dry-run', 'help', 'exclusions:', 'directory:', 'find:', 'replace:']);
+if (isset($options['h']) || isset($options['help'])) {
+  usage();
+}
+
+$dry = isset($options['n']) || isset($options['dry-run']);
+$find = $options['f'] ?? $options['find'] ?? null;
+$replace = $options['r'] ?? $options['replace'] ?? null;
+$dir = $options['d'] ?? $options['directory'] ?? '.';
+
+// Find and replace are required.
+if (!$find || !$replace) {
+  usage();
+}
+
+// Process the exclusions file, if any.
+$xFile = $options['x'] ?? $options['exclusions'] ?? null;
+if ($xFile) {
+  $exclusions = @file_get_contents($xFile);
+  if ($exclusions) {
+    // Effectively, we want a case insensitive map.
+    $exclusions = preg_split('/\s+/', trim(strtolower($exclusions)));
+    $exclusions = array_fill_keys($exclusions, true);
+  } else {
+    fprintf(STDERR, "%s: cannot load exclusions\n", $xFile);
+    exit(2);
+  }
+} else {
+  $exclusions = [];
+}
+
+libxml_use_internal_errors(true);
+foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir)) as $path => $_) {
+  if (basename($path) == 'versions.xml') {
+    $doc = @DOMDocument::load($path);
+    if (!$doc) {
+      fprintf(STDERR, "%s: libxml error: %s\n", libxml_get_last_error());
+      continue;
+    }
+
+    $updated = [];
+    foreach ($doc->getElementsByTagName('function') as $function) {
+      $name = $function->getAttribute('name');
+      $from = $function->getAttribute('from');
+
+      if (!$name) {
+        fprintf(STDERR, "%s: malformed or missing name\n", $path);
+        continue;
+      }
+
+      if (!$from) {
+        fprintf(STDERR, "%s: no from attribute for '%s'\n", $path, $name);
+        continue;
+      }
+
+      if (isset($exclusions[strtolower($name)])) {
+        continue;
+      }
+
+      // Look for version information that includes the version we're looking
+      // for, doesn't have a < or <= constraint (indicating it was removed
+      // before the end of the major version), and doesn't already include the
+      // new version.
+      if ((false !== strpos($from, $find)) &&
+          !preg_match('/'.preg_quote($find).'([^,]+)</', $from) &&
+          (false === strpos($from, $replace))) {
+        // If there's a trailing PECL version, insert before that.
+        if (preg_match('/, PECL([^,]+)$/', $from)) {
+          $function->setAttribute('from', str_replace(', PECL', ", $replace, PECL", $from));
+        } else {
+          $function->setAttribute('from', "$from, $replace");
+        }
+        $updated[] = $name;
+      }
+    }
+
+    if ($updated) {
+      printf("%s: updated %s\n", $path, implode('; ', $updated));
+      if (!$dry) {
+        $doc->save($path);
+      }
+    } else {
+      printf("%s: nothing to do\n", $path);
+    }
+  }
+}
